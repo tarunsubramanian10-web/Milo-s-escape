@@ -1,0 +1,1662 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<title>Milo's Great Escape 🐕</title>
+<link href="https://fonts.googleapis.com/css2?family=Fredoka+One&family=Nunito:wght@700;900&display=swap" rel="stylesheet">
+<style>
+*{margin:0;padding:0;box-sizing:border-box}
+body{background:#07040f;display:flex;flex-direction:column;align-items:center;
+  justify-content:center;min-height:100vh;user-select:none;}
+canvas{display:block;border-radius:8px;box-shadow:0 0 60px rgba(255,100,150,0.4);}
+#tip{color:#2a1030;font-size:10px;margin-top:6px;font-family:monospace;letter-spacing:1px;}
+</style>
+</head>
+<body>
+<canvas id="c" width="960" height="540"></canvas>
+<div id="tip">ARROWS / WASD: Move &nbsp;·&nbsp; SPACE / W / ↑: Jump &nbsp;·&nbsp; Double Jump! &nbsp;·&nbsp; ESC: Pause &nbsp;·&nbsp; M: Mute music &nbsp;·&nbsp; Stomp enemies!</div>
+<script>
+// ============================================================
+//  MILO'S GREAT ESCAPE — A Personalised Kanaka Adventure
+//  "Your dog stole your vada pav and started Lola the Corolla.
+//   He did it first try. He never does it first try." — 5 Levels
+// ============================================================
+
+const CVS=document.getElementById('c');
+const ctx=CVS.getContext('2d');
+const W=960,H=540;
+const GRAV=0.58,JSPD=-13.5,JSPD2=-11.5,MSPD=4.8;
+
+// ── Sound System (Web Audio API — no files needed) ────────────
+const AC=new (window.AudioContext||window.webkitAudioContext)();
+function resumeAC(){if(AC.state==='suspended')AC.resume();}
+document.addEventListener('keydown',resumeAC,{once:false});
+document.addEventListener('click',resumeAC,{once:false});
+
+function playTone(freq,type,vol,dur,freqEnd){
+  try{
+    const o=AC.createOscillator(),g=AC.createGain();
+    o.connect(g);g.connect(AC.destination);
+    o.type=type||'sine';
+    o.frequency.setValueAtTime(freq,AC.currentTime);
+    if(freqEnd)o.frequency.exponentialRampToValueAtTime(freqEnd,AC.currentTime+dur);
+    g.gain.setValueAtTime(vol,AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+dur);
+    o.start();o.stop(AC.currentTime+dur);
+  }catch(e){}
+}
+function playNoise(vol,dur,filterFreq){
+  try{
+    const buf=AC.createBuffer(1,AC.sampleRate*dur,AC.sampleRate);
+    const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=Math.random()*2-1;
+    const src=AC.createBufferSource(),flt=AC.createBiquadFilter(),g=AC.createGain();
+    src.buffer=buf;flt.type='bandpass';flt.frequency.value=filterFreq||400;
+    src.connect(flt);flt.connect(g);g.connect(AC.destination);
+    g.gain.setValueAtTime(vol,AC.currentTime);
+    g.gain.exponentialRampToValueAtTime(0.001,AC.currentTime+dur);
+    src.start();src.stop(AC.currentTime+dur);
+  }catch(e){}
+}
+
+const SFX={
+  jump(){playTone(320,'sine',0.18,0.12,520);},
+  jump2(){playTone(280,'sine',0.15,0.1,440);},
+  coin(){
+    playTone(880,'sine',0.18,0.08);
+    setTimeout(()=>playTone(1100,'sine',0.14,0.1),60);
+  },
+  stomp(){
+    playNoise(0.22,0.08,200);
+    playTone(120,'square',0.18,0.12,60);
+  },
+  hurt(){
+    playTone(220,'sawtooth',0.2,0.08,120);
+    playNoise(0.15,0.1,300);
+  },
+  levelClear(){
+    [523,659,784,1047].forEach((f,i)=>setTimeout(()=>playTone(f,'sine',0.18,0.18),i*120));
+  },
+  gameOver(){
+    playTone(400,'sawtooth',0.2,0.1,200);
+    setTimeout(()=>playTone(250,'sawtooth',0.18,0.15,150),120);
+    setTimeout(()=>playTone(180,'sawtooth',0.16,0.3,80),280);
+  },
+  win(){
+    const seq=[523,659,784,880,1047,880,1047,1175];
+    seq.forEach((f,i)=>setTimeout(()=>playTone(f,'sine',0.2,0.22),i*100));
+  },
+};
+
+// ── Music Engine ─────────────────────────────────────────────
+// 5 unique chiptune tracks, one per level. Pure Web Audio, no files.
+const MUSIC={
+  _nodes:[],
+  _playing:false,
+  _beat:0,
+  _intervalId:null,
+  _masterGain:null,
+  muted:false,
+
+  init(){
+    if(this._masterGain) return;
+    this._masterGain=AC.createGain();
+    this._masterGain.gain.value=0.28;
+    this._masterGain.connect(AC.destination);
+  },
+
+  // note(freq, type, vol, dur, delay)
+  note(freq,type,vol,dur,delay=0){
+    if(this.muted||!freq) return;
+    try{
+      const o=AC.createOscillator(),g=AC.createGain();
+      o.type=type;o.frequency.value=freq;
+      o.connect(g);g.connect(this._masterGain);
+      const t=AC.currentTime+delay;
+      g.gain.setValueAtTime(0,t);
+      g.gain.linearRampToValueAtTime(vol,t+0.01);
+      g.gain.exponentialRampToValueAtTime(0.001,t+dur);
+      o.start(t);o.stop(t+dur+0.05);
+      this._nodes.push(o);
+    }catch(e){}
+  },
+
+  kick(delay=0){
+    if(this.muted) return;
+    try{
+      const o=AC.createOscillator(),g=AC.createGain();
+      o.type='sine';
+      const t=AC.currentTime+delay;
+      o.frequency.setValueAtTime(160,t);
+      o.frequency.exponentialRampToValueAtTime(40,t+0.1);
+      g.gain.setValueAtTime(0.5,t);
+      g.gain.exponentialRampToValueAtTime(0.001,t+0.18);
+      o.connect(g);g.connect(this._masterGain);
+      o.start(t);o.stop(t+0.2);
+    }catch(e){}
+  },
+
+  snare(delay=0){
+    if(this.muted) return;
+    try{
+      const buf=AC.createBuffer(1,AC.sampleRate*0.12,AC.sampleRate);
+      const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1);
+      const src=AC.createBufferSource(),f=AC.createBiquadFilter(),g=AC.createGain();
+      f.type='highpass';f.frequency.value=1200;
+      src.buffer=buf;src.connect(f);f.connect(g);g.connect(this._masterGain);
+      const t=AC.currentTime+delay;
+      g.gain.setValueAtTime(0.22,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.12);
+      src.start(t);src.stop(t+0.13);
+    }catch(e){}
+  },
+
+  hihat(delay=0,vol=0.08){
+    if(this.muted) return;
+    try{
+      const buf=AC.createBuffer(1,AC.sampleRate*0.04,AC.sampleRate);
+      const d=buf.getChannelData(0);for(let i=0;i<d.length;i++)d[i]=(Math.random()*2-1);
+      const src=AC.createBufferSource(),f=AC.createBiquadFilter(),g=AC.createGain();
+      f.type='highpass';f.frequency.value=8000;
+      src.buffer=buf;src.connect(f);f.connect(g);g.connect(this._masterGain);
+      const t=AC.currentTime+delay;
+      g.gain.setValueAtTime(vol,t);g.gain.exponentialRampToValueAtTime(0.001,t+0.04);
+      src.start(t);src.stop(t+0.05);
+    }catch(e){}
+  },
+
+  stop(){
+    clearInterval(this._intervalId);
+    this._intervalId=null;
+    this._playing=false;
+    this._beat=0;
+    try{this._nodes.forEach(n=>{try{n.stop();}catch(e){}});}catch(e){}
+    this._nodes=[];
+  },
+
+  play(trackIdx){
+    this.init();
+    if(AC.state==='suspended') AC.resume();
+    this.stop();
+    this._playing=true;
+    this._beat=0;
+    const tracks=[
+      ()=>this._trackDombivli(),
+      ()=>this._trackSahyadri(),
+      ()=>this._trackConcert(),
+      ()=>this._trackMarket(),
+      ()=>this._trackHighway(),
+    ];
+    const fn=tracks[Math.min(trackIdx,4)]||tracks[0];
+    // Step every 200ms = 150bpm 8th-notes
+    this._intervalId=setInterval(()=>{
+      if(!this._playing) return;
+      if(AC.state==='suspended') AC.resume();
+      fn();
+      this._beat=(this._beat+1)%64;
+    },200);
+  },
+
+  toggleMute(){
+    this.muted=!this.muted;
+    if(this._masterGain)
+      this._masterGain.gain.value=this.muted?0:0.28;
+    return this.muted;
+  },
+
+  // ── Track 1: Dombivli — upbeat Marathi folk chiptune ──────
+  _trackDombivli(){
+    const b=this._beat;
+    // Melody: C major pentatonic bouncy
+    const mel=[523,659,784,880,784,659,523,587,
+               523,659,784,1047,880,784,659,523];
+    const mel2=[659,784,880,1047,880,784,659,784,
+                659,523,587,659,784,880,784,659];
+    const bass=[131,131,165,131,175,131,165,131];
+    // Kick on beats 0,4,8...
+    if(b%4===0) this.kick();
+    if(b%8===4) this.snare();
+    if(b%2===1) this.hihat(0,0.06);
+    // Melody
+    const mNote=b<32?mel[b%16]:mel2[b%16];
+    if(b%2===0) this.note(mNote,'square',0.18,0.22);
+    // Bass
+    if(b%8===0||b%8===3) this.note(bass[b%8],'sawtooth',0.14,0.35);
+    // Harmony
+    if(b%16===8) this.note(392,'triangle',0.1,0.4);
+    if(b%16===12) this.note(440,'triangle',0.1,0.35);
+  },
+
+  // ── Track 2: Sahyadri — adventurous, slightly mysterious ──
+  _trackSahyadri(){
+    const b=this._beat;
+    const mel=[392,440,494,440,392,349,392,440,
+               494,523,494,440,392,349,330,392];
+    const mel2=[523,587,659,587,523,494,523,587,
+                659,698,659,587,523,494,440,523];
+    const bass=[98,98,110,98,123,110,98,110];
+    if(b%4===0) this.kick();
+    if(b%8===4) this.snare(0,0.15);
+    if(b%4===2) this.hihat(0,0.07);
+    const mNote=b<32?mel[b%16]:mel2[b%16];
+    if(b%2===0) this.note(mNote,'triangle',0.16,0.28);
+    if(b%8===0) this.note(bass[b%8],'sawtooth',0.15,0.5);
+    // Bird-like arp
+    if(b%16===0){this.note(1047,'sine',0.08,0.1);this.note(1319,'sine',0.07,0.1,0.1);}
+    if(b%16===8){this.note(880,'sine',0.08,0.1);this.note(1047,'sine',0.07,0.1,0.1);}
+  },
+
+  // ── Track 3: Concert — pulsing EDM chiptune ───────────────
+  _trackConcert(){
+    const b=this._beat;
+    const mel=[880,0,1047,0,880,784,0,880,
+               784,0,659,0,784,880,0,784];
+    const mel2=[1047,0,1319,0,1047,880,0,1047,
+                880,0,784,0,880,1047,0,880];
+    const bass=[110,110,0,110,110,0,131,0];
+    // Four-on-floor kick
+    if(b%4===0) this.kick();
+    if(b%4===2) this.snare(0,0.2);
+    this.hihat(0,0.05+((b%2===0)?0.03:0));
+    const mNote=b<32?mel[b%16]:mel2[b%16];
+    if(mNote) this.note(mNote,'sawtooth',0.14,0.18);
+    if(bass[b%8]) this.note(bass[b%8],'sawtooth',0.18,0.22);
+    // Synth lead stab
+    if(b%16===0||b%16===10) this.note(440,'square',0.1,0.15);
+    // Build every 32 beats
+    if(b===31||b===63) this.note(1760,'sine',0.12,0.08);
+  },
+
+  // ── Track 4: Dadar Market — chaotic, busy, fun ────────────
+  _trackMarket(){
+    const b=this._beat;
+    const mel=[659,698,784,698,659,622,659,698,
+               784,831,784,698,659,622,587,659];
+    const mel2=[784,831,880,831,784,698,784,831,
+                880,988,880,831,784,698,659,784];
+    const bass=[165,165,196,165,185,165,175,165];
+    if(b%4===0) this.kick();
+    if(b%8===2||b%8===6) this.snare(0,0.18);
+    if(b%2===1) this.hihat(0,0.09);
+    if(b%4===1||b%4===3) this.hihat(0,0.04);
+    const mNote=b<32?mel[b%16]:mel2[b%16];
+    this.note(mNote,'square',0.15,0.19);
+    if(b%8===0||b%8===5) this.note(bass[b%8],'sawtooth',0.16,0.3);
+    // Market bustle chord stabs
+    if(b%16===4){this.note(523,'triangle',0.07,0.15);this.note(659,'triangle',0.07,0.15);}
+    if(b%16===12){this.note(494,'triangle',0.07,0.15);this.note(622,'triangle',0.07,0.15);}
+  },
+
+  // ── Track 5: Highway — driving, fast, epic finale ─────────
+  _trackHighway(){
+    const b=this._beat;
+    const mel=[784,0,880,784,698,784,0,659,
+               784,0,880,1047,880,784,0,698];
+    const mel2=[880,0,1047,880,784,880,0,784,
+                880,0,1047,1175,1047,880,0,784];
+    const bass=[196,196,220,196,247,220,196,220];
+    // Driving kick every beat
+    if(b%4===0) this.kick();
+    if(b%4===2) this.kick();// double kick!
+    if(b%4===1||b%4===3) this.snare(0,0.22);
+    this.hihat(0,0.06);
+    const mNote=b<32?mel[b%16]:mel2[b%16];
+    if(mNote) this.note(mNote,'sawtooth',0.16,0.19);
+    this.note(bass[b%8],'sawtooth',0.2,0.22);
+    // Power chord hits
+    if(b%8===0){
+      this.note(392,'square',0.1,0.18);
+      this.note(494,'square',0.08,0.18);
+    }
+    if(b%8===4){
+      this.note(440,'square',0.1,0.18);
+      this.note(554,'square',0.08,0.18);
+    }
+    // Epic sweep every 32
+    if(b===30||b===62){
+      [784,880,1047,1319].forEach((f,i)=>setTimeout(()=>this.note(f,'sine',0.12,0.12),i*50));
+    }
+  },
+};
+
+const K={};
+document.addEventListener('keydown',e=>{
+  K[e.code]=true;
+  if(['Space','ArrowUp','ArrowDown','ArrowLeft','ArrowRight'].includes(e.code))e.preventDefault();
+  onKey(e.code);
+});
+document.addEventListener('keyup',e=>{K[e.code]=false;});
+
+// ── State ─────────────────────────────────────────────────────
+let GS='INTRO',prevGS='',lvl=0,score=0,fn=0;
+let storyPage=0,clearPage=0,totalCoins=0;
+
+// ── Player ────────────────────────────────────────────────────
+const PL={x:80,y:380,w:32,h:44,vx:0,vy:0,onGround:false,
+  jumpsLeft:2,lives:3,dir:1,wf:0,inv:0,sx:80,sy:350,dead:false};
+
+// ── Camera ────────────────────────────────────────────────────
+const CAM={x:0,y:0};
+function updateCam(ww){
+  const tx=PL.x+PL.w/2-W*0.38;
+  CAM.x+=(tx-CAM.x)*0.1;
+  CAM.x=Math.max(0,Math.min(ww-W,CAM.x));
+  CAM.y=0; // no vertical scroll needed
+}
+
+// ── Runtime ───────────────────────────────────────────────────
+let platforms=[],movingPlats=[],enemies=[],coins=[],goal={x:0,y:0,w:60,h:60};
+let LD=null,miloX=0,miloY=0;
+
+// ── Level Definitions ─────────────────────────────────────────
+// plats: [x,y,w,h,color]   ens: [x,minX,maxX,spd,emoji,fly,baseY]   cs: [x,y]
+const LEVELS=[
+{
+  name:'Level 1 — Dombivli Station Dash',ww:3200,
+  bgTop:'#ff7a2a',bgBot:'#ffc86e',
+  cEmoji:'🫓',cName:'Vada Pav',
+  miloSay:'Catch me if you can!! 🐾💨',
+  story:[
+    '🌸  MILO\'S GREAT ESCAPE  🌸\n\nA Kanaka Adventure',
+    'It was a perfectly normal Dombivli morning.\nYou had ONE vada pav left. JUST ONE.\nSachi had already eaten the other three.',
+    'Then Milo grabbed the last one...\n...and somehow started Lola the Corolla.\nLola. Who needs 3 attempts and a prayer.',
+    'Milo did it first try.\n\nFirst. Try.\n\nSachi: "bro is built different"',
+    'PRABH: "Kanaka just let him have it"\nKANAKA: "Prabh I will leave you here"\nPRABH: "ok ok go catch the dog"',
+    'Sachi offered to help.\nShe then immediately tripped.\nShe is now sitting on the footpath eating chips.',
+    'It is up to YOU alone.\nCollect your stolen food! Stomp enemies! 🦶\n\n[ SPACE to begin! ]',
+  ],
+  clear:[
+    'You spotted Milo\'s paw prints heading\ninto the Sahyadri hills!\n\nPrabh, who came to "help", is 200m behind.',
+    'SACHI: *still sitting on footpath*\n"Did she catch him?"\nPRABH: "I can\'t see her she\'s too fast"',
+    'MILO: "You\'ll never catch me 🐾"\nKANAKA: "Milo that is MY car"\n\n[ SPACE for next level ]',
+  ],
+  plats:[
+    [0,480,500,60,'#7a7060'],[600,480,460,60,'#7a7060'],[1140,480,480,60,'#7a7060'],
+    [1710,480,470,60,'#7a7060'],[2270,480,490,60,'#7a7060'],[2850,480,410,60,'#7a7060'],
+    [200,395,120,18,'#a09080'],[360,355,100,18,'#a09080'],
+    [530,440,100,18,'#b0a070'],[650,375,120,18,'#a09080'],
+    [820,325,100,18,'#a09080'],[980,400,110,18,'#b0a070'],
+    [1100,440,90,18,'#b0a070'],[1220,355,120,18,'#a09080'],
+    [1390,300,100,18,'#a09080'],[1530,378,120,18,'#a09080'],
+    [1670,440,90,18,'#b0a070'],[1790,355,120,18,'#a09080'],
+    [1950,295,100,18,'#a09080'],[2090,375,120,18,'#a09080'],
+    [2240,440,90,18,'#b0a070'],[2360,348,120,18,'#a09080'],
+    [2520,285,100,18,'#a09080'],[2650,368,120,18,'#a09080'],
+    [2800,418,140,18,'#c0a878'],
+  ],
+  ens:[
+    [320,180,490,1.5,'🛺',0,444],[745,620,970,1.8,'🛺',0,444],
+    [1310,1160,1510,1.6,'🛺',0,444],[1810,1700,1990,2.0,'🛺',0,444],
+    [2160,2060,2270,1.7,'🛺',0,444],[2560,2440,2690,2.1,'🛺',0,444],
+  ],
+  cs:[[250,365],[400,325],[680,345],[860,295],[1270,325],[1570,348],[2100,265],[2800,388]],
+  goalX:2960,goalY:440,
+},
+{
+  name:'Level 2 — Sahyadri Scramble',ww:3400,
+  bgTop:'#1a4a1a',bgBot:'#2d7a2d',
+  cEmoji:'🍡',cName:'Modak',
+  miloSay:'The forest is nice actually! 🌿🐕',
+  story:[
+    '🌿  LEVEL 2 — SAHYADRI SCRAMBLE  🌿',
+    'Milo ran into the Sahyadri hills.\nPrabh finally caught up.\nShe is already out of breath.',
+    'PRABH: "Kanaka wait—"\nKANAKA: *does not wait*\nPRABH: "I should have stayed with Sachi"',
+    'Milo has somehow befriended the bees.\nHe bribed them with YOUR modak.\nThe bees respect him. The bees do not respect you.',
+    'SACHI: *calls from Dombivli*\n"Did you catch him yet?"\nKANAKA: "SACHI I AM ON A HILL"\nSACHI: "ok text me when you\'re done"',
+    'Stomp the bees and monkeys!\nCollect all your modak back!\n\n[ SPACE to climb! ]',
+  ],
+  clear:[
+    'Lola is parked behind a banyan tree.\nMilo left a note: "gone 2 music fest lol"\n\nPrabh sat down and refused to move.',
+    'PRABH: "Kanaka my legs hurt"\nKANAKA: "Prabh we\'ve walked 400 metres"\nPRABH: "that is a lot for me"',
+    'Sachi: *sends a meme*\nKanaka: *does not respond*\nKanaka: *is already at the festival*\n\n[ SPACE for next level ]',
+  ],
+  plats:[
+    [0,485,400,55,'#3a5a1a'],[480,485,360,55,'#3a5a1a'],[930,485,410,55,'#3a5a1a'],
+    [1440,485,380,55,'#3a5a1a'],[1920,485,400,55,'#3a5a1a'],[2420,485,390,55,'#3a5a1a'],
+    [2910,485,550,55,'#3a5a1a'],
+    [150,400,120,20,'#4a7a20'],[320,350,100,20,'#4a7a20'],
+    [440,448,90,20,'#5a8a28'],[560,370,120,20,'#4a7a20'],
+    [720,318,110,20,'#4a7a20'],[870,398,100,20,'#5a8a28'],
+    [990,348,130,20,'#4a7a20'],[1160,278,110,20,'#4a7a20'],
+    [1300,358,120,20,'#4a7a20'],[1398,448,90,20,'#5a8a28'],
+    [1510,358,130,20,'#4a7a20'],[1670,288,110,20,'#4a7a20'],
+    [1810,378,120,20,'#4a7a20'],[1878,448,90,20,'#5a8a28'],
+    [2010,358,130,20,'#4a7a20'],[2170,288,110,20,'#4a7a20'],
+    [2310,370,120,20,'#4a7a20'],[2368,448,90,20,'#5a8a28'],
+    [2490,338,130,20,'#4a7a20'],[2650,268,110,20,'#4a7a20'],
+    [2790,358,120,20,'#4a7a20'],[2910,408,130,20,'#6a9a30'],
+    [400,425,80,25,'#806040'],[800,435,80,25,'#806040'],
+    [1230,425,80,25,'#806040'],[1690,425,80,25,'#806040'],
+    [2210,435,80,25,'#806040'],
+  ],
+  ens:[
+    [280,140,390,2.0,'🐝',1,320],[700,560,860,2.5,'🐝',1,278],
+    [1200,980,1360,2.2,'🐒',0,448],[1700,1540,1870,2.4,'🐝',1,250],
+    [2110,1968,2270,2.6,'🐒',0,448],[2610,2450,2770,2.3,'🐝',1,230],
+  ],
+  cs:[[370,318],[760,288],[1200,248],[1390,328],[1710,258],[2180,258],[2690,238],[2930,378]],
+  goalX:3260,goalY:455,
+},
+{
+  name:'Level 3 — Pune Music Scene',ww:3200,
+  bgTop:'#0d0525',bgBot:'#1a0840',
+  cEmoji:'🍛',cName:'Puran Poli',
+  miloSay:'I\'m with the band now! 🎵🐾',
+  story:[
+    '🎵  LEVEL 3 — PUNE MUSIC SCENE  🎵',
+    'Milo is at the music festival.\nHe is on the VIP guest list.\nYOU are not on the VIP guest list.',
+    'Sachi somehow got here before you.\nShe is in the crowd eating festival food.\nShe does not know where Milo is.\nShe does not care.',
+    'SACHI: "Kanaka omg this DJ is so good"\nKANAKA: "WHERE IS MILO"\nSACHI: "idk but try the pav bhaji"',
+    'Milo was spotted backstage with the DJ.\nThe DJ called him "bro".\nMilo has better contacts than all of us.',
+    'PRABH: *arrives late, somehow has VIP band*\nKANAKA: "HOW DO YOU HAVE THAT"\nPRABH: "I don\'t know I just asked nicely"',
+    'Dodge the speakers! Collect your puran poli!\n\n[ SPACE to mosh! ]',
+  ],
+  clear:[
+    'Milo slipped out the backstage door.\nSachi waved goodbye to him.\nSACHI: "he\'s so cute re"',
+    'KANAKA: "SACHI YOU WERE SUPPOSED\nTO BLOCK THE EXIT"\nSACHI: "...he looked at me with his eyes"',
+    'PRABH: "I got us snacks though"\nKanaka: *takes the snacks*\nKanaka: *still mad*\n\n[ SPACE for next level ]',
+  ],
+  plats:[
+    [0,480,500,60,'#7c3fa0'],[580,480,450,60,'#7c3fa0'],[1120,480,480,60,'#7c3fa0'],
+    [1700,480,460,60,'#7c3fa0'],[2260,480,500,60,'#7c3fa0'],[2860,480,400,60,'#7c3fa0'],
+    [180,400,120,18,'#c060e0'],[340,350,110,18,'#d070f0'],
+    [530,438,100,18,'#a050c8'],[650,370,120,18,'#c060e0'],
+    [800,310,110,18,'#d070f0'],[960,390,100,18,'#a050c8'],
+    [1080,438,90,18,'#a050c8'],[1200,350,130,18,'#c060e0'],
+    [1360,290,110,18,'#d070f0'],[1520,370,120,18,'#c060e0'],
+    [1660,435,100,18,'#a050c8'],[1780,340,130,18,'#c060e0'],
+    [1940,278,110,18,'#d070f0'],[2100,358,120,18,'#c060e0'],
+    [2220,435,100,18,'#a050c8'],[2360,338,130,18,'#d070f0'],
+    [2520,268,110,18,'#c060e0'],[2680,358,120,18,'#d070f0'],
+    [2820,420,130,18,'#e080ff'],
+  ],
+  ens:[
+    [260,140,420,1.8,'🔊',0,444],[730,580,880,2.0,'🔊',0,444],
+    [1250,1090,1420,1.9,'🎶',1,260],[1650,1480,1800,2.2,'🔊',0,444],
+    [2050,1900,2200,2.0,'🎶',1,250],[2450,2300,2600,2.3,'🔊',0,444],
+  ],
+  cs:[[210,370],[380,320],[840,278],[1400,258],[1560,340],[1980,248],[2560,238],[2840,390]],
+  goalX:3060,goalY:450,
+  movingPlats:[
+    // [x,y,w,h,color, minX,maxX, speed, axis]  axis: 'x'=horizontal 'y'=vertical
+    [500,320,90,18,'#e080ff', 440,620, 1.8,'x'],
+    [1050,260,90,18,'#c060e0', 950,1180, 2.0,'x'],
+    [1750,310,90,18,'#e080ff', 1650,1900, 1.6,'x'],
+    [2300,250,90,18,'#c060e0', 2200,2450, 2.2,'x'],
+    [2700,300,80,18,'#e080ff', 2600,2820, 1.8,'x'],
+  ],
+},
+{
+  name:'Level 4 — Dadar Market Dash',ww:3600,
+  bgTop:'#c05a10',bgBot:'#f0a840',
+  cEmoji:'🌶️',cName:'Misal Pav',
+  miloSay:'Best. Day. Ever. 🛒🐕',
+  story:[
+    '🛒  LEVEL 4 — DADAR MARKET  🛒',
+    'Milo is IN the market.\nHe is SELLING your misal pav.\nHe has a little sign: "MILO\'S BITES 🐾"',
+    'PRABH: "Kanaka wait he\'s actually\ndoing really good business"\nKANAKA: "PRABH."',
+    'Sachi stopped to buy flowers.\nShe bought Milo a flower.\nShe gave it to Milo directly.\nMilo accepted it.',
+    'SACHI: "He\'s basically my nephew re"\nKANAKA: "He stole my food Sachi"\nSACHI: "boys will be boys"',
+    'Prabh tried to catch him.\nThree aunties blocked the path.\nPRABH: "Sorry aunty— sorry— excuse—"\nThe aunties did not move.',
+    'Dodge the veggies! Stomp the crows!\n\n[ SPACE — cause a scene! ]',
+  ],
+  clear:[
+    'Milo got to Lola and hit the highway.\nPrabh is still stuck behind the aunties.\nShe has now been offered tea.',
+    'AUNTY: "Sit sit, have some chai"\nPRABH: "I really have to go—"\nAUNTY: "I\'ll get the biscuits also"',
+    'SACHI: *buys more flowers*\nKANAKA: *already on the highway*\n\n[ SPACE — FINAL LEVEL! ]',
+  ],
+  plats:[
+    [0,480,460,60,'#8a5a20'],[540,480,420,60,'#8a5a20'],[1060,480,460,60,'#8a5a20'],
+    [1620,480,440,60,'#8a5a20'],[2160,480,460,60,'#8a5a20'],[2720,480,440,60,'#8a5a20'],
+    [3260,480,400,60,'#8a5a20'],
+    [160,395,130,20,'#a07030'],[330,345,110,20,'#a07030'],
+    [490,442,100,20,'#c08840'],[620,365,130,20,'#a07030'],
+    [790,315,110,20,'#a07030'],[960,397,120,20,'#c08840'],
+    [1060,442,90,20,'#c08840'],[1190,355,130,20,'#a07030'],
+    [1360,295,110,20,'#a07030'],[1500,375,120,20,'#a07030'],
+    [1580,442,90,20,'#c08840'],[1700,350,130,20,'#a07030'],
+    [1870,285,110,20,'#a07030'],[2010,365,120,20,'#a07030'],
+    [2120,442,90,20,'#c08840'],[2240,345,130,20,'#a07030'],
+    [2410,275,110,20,'#a07030'],[2560,365,120,20,'#a07030'],
+    [2680,442,90,20,'#c08840'],[2800,340,130,20,'#a07030'],
+    [2970,268,110,20,'#a07030'],[3110,358,130,20,'#a07030'],
+    [3270,415,130,20,'#c09848'],
+  ],
+  ens:[
+    [270,138,422,1.9,'🥬',1,310],[740,588,922,2.1,'🐦',0,444],
+    [1250,1098,1432,2.0,'🥬',1,280],[1740,1578,1922,2.3,'🐦',0,444],
+    [2300,2148,2472,2.1,'🥬',1,260],[2870,2698,3062,2.4,'🐦',0,444],
+  ],
+  cs:[[190,365],[370,315],[830,285],[1400,265],[1540,345],[1910,255],[2450,245],[3140,328]],
+  goalX:3460,goalY:450,
+  movingPlats:[
+    [450,360,100,20,'#c08840', 300,420, 2.0,'y'],
+    [1000,330,100,20,'#a07030', 280,400, 2.3,'y'],
+    [1550,320,100,20,'#c08840', 270,390, 1.8,'y'],
+    [2100,310,100,20,'#a07030', 260,380, 2.5,'y'],
+    [2650,300,100,20,'#c08840', 250,370, 2.0,'y'],
+    [3200,290,100,20,'#a07030', 240,380, 2.2,'y'],
+  ],
+},
+{
+  name:'Level 5 — Lola\'s Last Ride',ww:4000,
+  bgTop:'#050514',bgBot:'#0a0a2a',
+  cEmoji:'🍮',cName:'Shrikhand',
+  miloSay:'VROOM VROOM !!! 🚗💨🐕',
+  story:[
+    '🚗  LEVEL 5 — LOLA\'S LAST RIDE  🚗',
+    'Milo. Is. On. The. Highway.\nIN LOLA.\nDoing 120 kmph.',
+    'Lola has never gone over 60.\nEVER.\nMilo\'s influence. Your car is corrupted.',
+    'PRABH: *calls from Dadar*\n"Did you catch him?"\n"I\'m still having chai with the aunty"',
+    'SACHI: *sends voice note*\n"Kanaka re I can see Lola from here\nhe honked at me I think he was saying hi\nhe\'s so sweet re—"',
+    'KANAKA: *does not reply to anyone*\nKANAKA: *is entirely focused*\nKANAKA: *is going to end this today*',
+    'Collect the shrikhand. Reach Milo.\nThis ends today.\n\n[ SPACE — let\'s go! ]',
+  ],
+  clear:[],
+  plats:[
+    [0,480,550,60,'#1a1a2a'],[630,480,500,60,'#1a1a2a'],[1230,480,520,60,'#1a1a2a'],
+    [1850,480,500,60,'#1a1a2a'],[2450,480,520,60,'#1a1a2a'],[3070,480,500,60,'#1a1a2a'],
+    [3670,480,380,60,'#1a1a2a'],
+    [180,400,130,18,'#2a2a3a'],[360,350,110,18,'#2a2a3a'],
+    [580,442,100,18,'#343448'],[710,365,130,18,'#2a2a3a'],
+    [880,310,110,18,'#2a2a3a'],[1070,397,120,18,'#343448'],
+    [1180,442,100,18,'#343448'],[1310,350,130,18,'#2a2a3a'],
+    [1480,285,110,18,'#2a2a3a'],[1630,370,120,18,'#2a2a3a'],
+    [1800,442,100,18,'#343448'],[1930,340,130,18,'#2a2a3a'],
+    [2100,268,110,18,'#2a2a3a'],[2260,358,120,18,'#2a2a3a'],
+    [2400,442,100,18,'#343448'],[2530,328,130,18,'#2a2a3a'],
+    [2700,258,110,18,'#2a2a3a'],[2860,354,120,18,'#2a2a3a'],
+    [3010,442,100,18,'#343448'],[3150,318,130,18,'#2a2a3a'],
+    [3320,248,110,18,'#2a2a3a'],[3480,348,130,18,'#2a2a3a'],
+    [3650,415,130,18,'#404460'],[3820,395,180,30,'#c01818'],
+  ],
+  ens:[
+    [280,148,452,2.2,'🚧',0,444],[800,638,982,2.5,'🚗',1,298],
+    [1380,1198,1562,2.3,'🚧',0,444],[1852,1678,2032,2.7,'🚗',1,278],
+    [2452,2268,2642,2.4,'🚧',0,444],[3102,2918,3302,2.8,'🚗',1,258],
+  ],
+  cs:[[220,370],[400,320],[920,278],[1522,254],[1672,338],[2142,238],[2742,228],[3362,218]],
+  goalX:3860,goalY:365,
+  movingPlats:[
+    [600,330,110,18,'#404460', 500,750, 2.5,'x'],
+    [1100,280,100,18,'#343448', 980,1230, 3.0,'x'],
+    [1700,320,110,18,'#404460', 1580,1820, 2.8,'x'],
+    [2300,270,100,18,'#343448', 2180,2430, 3.2,'x'],
+    [2900,310,110,18,'#404460', 2780,3020, 2.6,'x'],
+    [3500,260,100,18,'#343448', 3380,3620, 3.5,'x'],
+  ],
+},
+];
+
+// ── Helpers ─────────────────────────────────────────────────
+function rOvlp(ax,ay,aw,ah,bx,by,bw,bh){
+  return ax<bx+bw&&ax+aw>bx&&ay<by+bh&&ay+ah>by;
+}
+function wrapText(txt,x,y,maxW,lineH){
+  txt.split('\n').forEach((block,bi)=>{
+    const words=block.split(' ');let line='';let ly=y+bi*lineH;
+    words.forEach(word=>{
+      const test=line+word+' ';
+      if(ctx.measureText(test).width>maxW&&line!==''){
+        ctx.fillText(line,x,ly);ly+=lineH;line=word+' ';
+      }else line=test;
+    });
+    if(line.trim())ctx.fillText(line,x,ly);
+  });
+}
+
+// ── Load level ────────────────────────────────────────────────
+function loadLevel(idx){
+  LD=LEVELS[idx];
+  platforms=LD.plats.map(([x,y,w,h,c])=>({x,y,w,h,c,moving:false}));
+  // Moving platforms: store original pos + travel params
+  movingPlats=(LD.movingPlats||[]).map(([x,y,w,h,c,min,max,spd,axis])=>({
+    x,y,w,h,c,min,max,spd,axis,orig:axis==='x'?x:y,t:Math.random()*Math.PI*2
+  }));
+  enemies=LD.ens.map(([x,mnX,mxX,spd,emoji,fly,baseY])=>({
+    x,y:fly?baseY:(baseY||444),w:36,h:36,vx:spd,emoji,fly:!!fly,
+    minX:mnX,maxX:mxX,baseY:baseY||444,wobble:Math.random()*Math.PI*2,alive:true
+  }));
+  coins=LD.cs.map(([x,y])=>({x,y,collected:false,bob:Math.random()*Math.PI*2}));
+  goal={x:LD.goalX,y:LD.goalY,w:56,h:64};
+  miloX=LD.goalX+10; miloY=LD.goalY-52;
+  const firstFloor=LD.plats[0];
+  PL.x=PL.sx=90; PL.y=PL.sy=firstFloor[1]-PL.h-4;
+  MUSIC.play(idx);
+  PL.vx=0;PL.vy=0;PL.onGround=false;PL.jumpsLeft=2;PL.inv=0;PL.dead=false;
+  CAM.x=0;CAM.y=0;
+}
+
+// ── Physics ───────────────────────────────────────────────────
+function updateMovingPlats(){
+  movingPlats.forEach(mp=>{
+    mp.t+=mp.spd*0.02;
+    const prev=mp.axis==='x'?mp.x:mp.y;
+    const travel=(mp.max-mp.min)/2;
+    const centre=(mp.max+mp.min)/2;
+    const val=centre+Math.sin(mp.t)*travel;
+    if(mp.axis==='x')mp.x=val; else mp.y=val;
+    // If player is standing on this platform, carry them
+    const delta=mp.axis==='x'?(mp.x-prev):0;
+    const deltaY=mp.axis==='y'?(mp.y-prev):0;
+    if(PL.onGround&&rOvlp(PL.x,PL.y+PL.h-2,PL.w,4,mp.x,mp.y,mp.w,mp.h)){
+      PL.x+=delta;PL.y+=deltaY;
+    }
+  });
+}
+
+function allPlatforms(){return [...platforms,...movingPlats];}
+
+function updatePlayer(){
+  if(GS!=='PLAYING')return;
+  if(K['ArrowLeft']||K['KeyA']){PL.vx=-MSPD;PL.dir=-1;}
+  else if(K['ArrowRight']||K['KeyD']){PL.vx=MSPD;PL.dir=1;}
+  else PL.vx*=0.75;
+  if(Math.abs(PL.vx)>0.5&&PL.onGround)PL.wf+=0.2;
+  PL.vy=Math.min(PL.vy+GRAV,18);
+  if(PL.inv>0)PL.inv--;
+
+  const allPlats=allPlatforms();
+
+  // Horizontal
+  PL.x+=PL.vx;
+  PL.x=Math.max(0,Math.min(LD.ww-PL.w,PL.x));
+  for(const pl of allPlats){
+    if(rOvlp(PL.x,PL.y,PL.w,PL.h,pl.x,pl.y,pl.w,pl.h)){
+      if(PL.vx>0)PL.x=pl.x-PL.w;
+      else PL.x=pl.x+pl.w;
+      PL.vx=0;
+    }
+  }
+
+  // Vertical
+  PL.onGround=false;
+  PL.y+=PL.vy;
+  for(const pl of allPlats){
+    if(rOvlp(PL.x,PL.y,PL.w,PL.h,pl.x,pl.y,pl.w,pl.h)){
+      if(PL.vy>=0){PL.y=pl.y-PL.h;PL.vy=0;PL.onGround=true;PL.jumpsLeft=2;}
+      else{PL.y=pl.y+pl.h;PL.vy=0;}
+    }
+  }
+
+  // Fall death
+  if(PL.y>H+300){die();return;}
+
+  // Enemy collision
+  for(let i=enemies.length-1;i>=0;i--){
+    const e=enemies[i];if(!e.alive)continue;
+    if(rOvlp(PL.x+4,PL.y,PL.w-8,PL.h,e.x,e.y,e.w,e.h)){
+      const prevBot=PL.y+PL.h-PL.vy;
+      if(prevBot<=e.y+8&&PL.vy>0){
+        e.alive=false;PL.vy=-10;PL.jumpsLeft=2;score+=50;SFX.stomp();
+      }else if(PL.inv===0){die();return;}
+    }
+  }
+
+  // Coins
+  for(const c of coins){
+    if(c.collected)continue;
+    if(Math.abs(PL.x+PL.w/2-c.x)<26&&Math.abs(PL.y+PL.h/2-c.y)<26){
+      c.collected=true;score+=100;totalCoins++;SFX.coin();
+    }
+  }
+
+  // Goal
+  if(rOvlp(PL.x,PL.y,PL.w,PL.h,goal.x,goal.y,goal.w,goal.h))reachGoal();
+}
+
+function updateEnemies(){
+  for(const e of enemies){
+    if(!e.alive)continue;
+    e.wobble+=0.06;e.x+=e.vx;
+    if(e.x>e.maxX){e.x=e.maxX;e.vx=-Math.abs(e.vx);}
+    if(e.x<e.minX){e.x=e.minX;e.vx=Math.abs(e.vx);}
+    if(e.fly)e.y=e.baseY+Math.sin(e.wobble)*28;
+  }
+}
+
+function die(){
+  if(PL.dead)return;PL.dead=true;
+  SFX.hurt();
+  PL.lives--;
+  if(PL.lives<=0){SFX.gameOver();MUSIC.stop();GS='GAMEOVER';return;}
+  setTimeout(()=>{
+    PL.x=PL.sx;PL.y=PL.sy;PL.vx=0;PL.vy=0;
+    PL.onGround=false;PL.jumpsLeft=2;PL.inv=150;PL.dead=false;
+    CAM.x=0;
+    GS='PLAYING';
+  },600);
+  GS='DYING';
+}
+
+function reachGoal(){
+  const all=coins.every(c=>c.collected);
+  score+=all?500:0;score+=PL.lives*200;
+  if(lvl===LEVELS.length-1){SFX.win();MUSIC.stop();GS='WIN';return;}
+  SFX.levelClear();
+  clearPage=0;GS='CLEARED';
+}
+
+// ── Drawing ───────────────────────────────────────────────────
+function drawBg(){
+  const g=ctx.createLinearGradient(0,0,0,H);
+  g.addColorStop(0,LD.bgTop);g.addColorStop(1,LD.bgBot);
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  // Level-specific BG decorations
+  if(lvl===0)drawCityBg();
+  else if(lvl===1)drawForestBg();
+  else if(lvl===2)drawConcertBg();
+  else if(lvl===3)drawMarketBg();
+  else if(lvl===4)drawHighwayBg();
+}
+
+function drawCityBg(){
+  ctx.fillStyle='rgba(0,0,0,0.22)';
+  for(let i=0;i<18;i++){
+    const bx=(i*180-CAM.x*0.25)%W-20;
+    const bh=80+i*22;const bw=30+i%3*20;
+    ctx.fillRect(bx,H-80-bh,bw,bh);
+    // windows
+    ctx.fillStyle='rgba(255,240,160,0.5)';
+    for(let r=0;r<4;r++)for(let c2=0;c2<3;c2++){
+      if((i+r+c2)%3!==0)ctx.fillRect(bx+4+c2*8,H-78-bh+r*18,5,8);
+    }
+    ctx.fillStyle='rgba(0,0,0,0.22)';
+  }
+}
+
+function drawForestBg(){
+  ctx.fillStyle='rgba(20,60,15,0.5)';
+  for(let i=0;i<16;i++){
+    const tx=(i*220-CAM.x*0.3)%W-30;
+    ctx.beginPath();ctx.moveTo(tx+25,H-120);
+    ctx.lineTo(tx,H-180+i%3*20);ctx.lineTo(tx+50,H-180+i%3*20);ctx.fill();
+    ctx.fillStyle='rgba(40,100,20,0.4)';
+    ctx.beginPath();ctx.moveTo(tx+25,H-155);
+    ctx.lineTo(tx+5,H-200+i%3*15);ctx.lineTo(tx+45,H-200+i%3*15);ctx.fill();
+    ctx.fillStyle='rgba(20,60,15,0.5)';
+  }
+}
+
+function drawConcertBg(){
+  const cols=['#ff6b9d','#a78bfa','#45b7d1','#ffd93d'];
+  const rgbas=['rgba(255,107,157','rgba(167,139,250','rgba(69,183,209','rgba(255,217,61'];
+  for(let i=0;i<8;i++){
+    const lx=((i*130+fn*0.5-(i%2===0?fn*0.3:0))-CAM.x*0.15+W)%W;
+    ctx.save();
+    ctx.globalAlpha=0.07+Math.abs(Math.sin(fn*0.04+i))*0.06;
+    ctx.fillStyle=cols[i%4];
+    ctx.beginPath();ctx.moveTo(lx,0);ctx.lineTo(lx-60,H);ctx.lineTo(lx+60,H);ctx.closePath();ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawMarketBg(){
+  ctx.save();ctx.globalAlpha=0.12;
+  const stripeCols=['#ff6b00','#ff3030','#30aa30'];
+  for(let i=0;i<14;i++){
+    const ax=((i*240)-CAM.x*0.2+W)%W-40;
+    ctx.fillStyle=stripeCols[i%3];
+    ctx.fillRect(ax,0,120,H);
+  }
+  ctx.restore();
+}
+
+function drawHighwayBg(){
+  ctx.save();
+  // Stars
+  ctx.globalAlpha=1;
+  ctx.fillStyle='rgba(255,255,255,0.6)';
+  for(let i=0;i<80;i++){
+    const sx=(i*97+13)%W,sy=(i*61+7)%300;
+    const ss=0.5+Math.sin(fn*0.05+i)*0.5;
+    ctx.beginPath();ctx.arc(sx,sy,ss,0,Math.PI*2);ctx.fill();
+  }
+  // Road lines
+  ctx.strokeStyle='rgba(255,255,200,0.2)';ctx.lineWidth=4;
+  ctx.setLineDash([60,40]);
+  ctx.lineDashOffset=-fn*3;
+  for(let lane=0;lane<3;lane++){
+    ctx.beginPath();ctx.moveTo(0,480+lane*2);ctx.lineTo(W,480+lane*2);ctx.stroke();
+  }
+  ctx.setLineDash([]);
+  // Street lights
+  for(let i=0;i<7;i++){
+    const lx=((i*200+100)-CAM.x*0.4+W*2)%W;
+    ctx.strokeStyle='rgba(255,220,100,0.3)';ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(lx,H-200);ctx.lineTo(lx,H);ctx.stroke();
+    ctx.globalAlpha=0.08;
+    ctx.fillStyle='#ffe080';
+    ctx.beginPath();ctx.arc(lx,H-200,60,0,Math.PI*2);ctx.fill();
+    ctx.globalAlpha=1;
+  }
+  ctx.restore();
+}
+
+function drawPlatforms(){
+  for(const pl of [...platforms,...movingPlats]){
+    const px=pl.x-CAM.x,py=pl.y-CAM.y;
+    if(px+pl.w<0||px>W)continue;
+    ctx.fillStyle=pl.c;ctx.fillRect(px,py,pl.w,pl.h);
+    ctx.fillStyle='rgba(255,255,255,0.14)';ctx.fillRect(px,py,pl.w,3);
+    ctx.fillStyle='rgba(0,0,0,0.18)';ctx.fillRect(px,py+pl.h-3,pl.w,3);
+    // Moving platform indicator — glowing edges
+    if(pl.min!==undefined){
+      ctx.strokeStyle='rgba(255,220,80,0.7)';ctx.lineWidth=2;
+      ctx.strokeRect(px,py,pl.w,pl.h);
+      // Arrow indicators
+      ctx.fillStyle='rgba(255,220,80,0.8)';ctx.font='bold 10px sans-serif';
+      ctx.textAlign='center';ctx.textBaseline='middle';
+      ctx.fillText(pl.axis==='x'?'↔':'↕',px+pl.w/2,py+pl.h/2);
+    }
+  }
+}
+
+function drawCoins(){
+  for(const c of coins){
+    if(c.collected)continue;
+    const cx2=c.x-CAM.x,cy2=c.y-CAM.y+Math.sin(fn*0.06+c.bob)*5;
+    if(cx2<-20||cx2>W+20)continue;
+    ctx.save();
+    ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+    ctx.translate(cx2,cy2);
+    const pulse=0.9+Math.sin(fn*0.1+c.bob)*0.1;
+    ctx.scale(pulse,pulse);
+    // Outer glow ring
+    ctx.strokeStyle='rgba(255,215,0,0.9)';ctx.lineWidth=2.5;
+    ctx.beginPath();ctx.arc(0,0,16,0,Math.PI*2);ctx.stroke();
+    // Food by level
+    if(lvl===0){
+      // Vada pav — brown bun
+      ctx.fillStyle='#c8784a';ctx.beginPath();ctx.ellipse(0,2,12,8,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e8a060';ctx.beginPath();ctx.ellipse(0,-2,11,6,0,Math.PI,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#5a3010';ctx.beginPath();ctx.ellipse(0,4,9,4,0,0,Math.PI);ctx.fill();
+    } else if(lvl===1){
+      // Modak — white dumpling
+      ctx.fillStyle='#f0ede0';ctx.beginPath();ctx.arc(0,2,11,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e0d8c8';
+      for(let i=0;i<6;i++){const a=i/6*Math.PI*2;ctx.beginPath();ctx.moveTo(0,2);ctx.lineTo(Math.cos(a)*11,2+Math.sin(a)*11);ctx.strokeStyle='#ccc8b8';ctx.lineWidth=1;ctx.stroke();}
+      ctx.fillStyle='#d4c8a8';ctx.beginPath();ctx.arc(0,-7,4,0,Math.PI*2);ctx.fill();
+    } else if(lvl===2){
+      // Puran poli — yellow flatbread
+      ctx.fillStyle='#e8b840';ctx.beginPath();ctx.ellipse(0,0,13,10,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#f0c850';ctx.beginPath();ctx.ellipse(-2,-1,9,7,0.2,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#c89828';ctx.lineWidth=1;
+      ctx.beginPath();ctx.ellipse(0,0,13,10,0,0,Math.PI*2);ctx.stroke();
+    } else if(lvl===3){
+      // Misal pav — red spicy bowl
+      ctx.fillStyle='#c83010';ctx.beginPath();ctx.arc(0,2,11,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e84020';ctx.beginPath();ctx.arc(-2,0,7,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#f0c040';ctx.fillRect(-5,6,10,5);
+      ctx.strokeStyle='#801808';ctx.lineWidth=1.5;ctx.beginPath();ctx.arc(0,2,11,0,Math.PI*2);ctx.stroke();
+    } else {
+      // Shrikhand — purple sweet
+      ctx.fillStyle='#c060c0';ctx.beginPath();ctx.arc(0,0,12,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e080e0';ctx.beginPath();ctx.arc(-2,-2,7,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#fff0ff';ctx.beginPath();ctx.arc(-3,-3,3,0,Math.PI*2);ctx.fill();
+    }
+    ctx.restore();
+  }
+}
+
+function drawEnemies(){
+  for(const e of enemies){
+    if(!e.alive)continue;
+    const ex=e.x-CAM.x,ey=e.y-CAM.y;
+    if(ex<-40||ex>W+40)continue;
+    ctx.save();
+    ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+    const cx=ex+e.w/2, cy=ey+e.h/2;
+    const flip=e.vx>0?-1:1;
+    ctx.translate(cx,cy);ctx.scale(flip,1);
+
+    if(e.emoji==='🛺'){
+      // Auto rickshaw — yellow body, black cab
+      ctx.fillStyle='#f0c000';ctx.fillRect(-18,-12,36,18);
+      ctx.fillStyle='#222';ctx.fillRect(-16,-20,24,12);
+      ctx.fillStyle='#66aaff';ctx.fillRect(-14,-18,20,9);
+      ctx.fillStyle='#333';
+      ctx.beginPath();ctx.arc(-10,8,6,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.arc(12,8,6,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ffdd00';ctx.fillRect(16,-6,6,6);
+    } else if(e.emoji==='🐝'){
+      // Bee — yellow+black stripes, wings
+      ctx.fillStyle='rgba(200,230,255,0.7)';
+      ctx.beginPath();ctx.ellipse(-8,-10,10,6,0.4,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.ellipse(8,-10,10,6,-0.4,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#f5c000';ctx.beginPath();ctx.ellipse(0,0,10,13,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#222';
+      ctx.fillRect(-10,-6,20,4);ctx.fillRect(-10,2,20,4);
+      ctx.beginPath();ctx.arc(0,-14,7,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#f5c000';ctx.beginPath();ctx.arc(0,-14,5,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ff4400';ctx.fillRect(-1,-8,2,8);// stinger
+    } else if(e.emoji==='🐒'){
+      // Monkey — brown body
+      ctx.fillStyle='#8B5E3C';ctx.beginPath();ctx.ellipse(0,2,12,14,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#c8945a';ctx.beginPath();ctx.ellipse(0,-14,10,10,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#8B5E3C';
+      ctx.beginPath();ctx.ellipse(-14,-16,5,7,0.3,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.ellipse(14,-16,5,7,-0.3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#e8b080';ctx.beginPath();ctx.ellipse(0,-10,6,5,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#222';ctx.beginPath();ctx.arc(-4,-15,2,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.arc(4,-15,2,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#c8945a';ctx.beginPath();ctx.ellipse(0,16,4,12,0,0,Math.PI*2);ctx.fill();
+    } else if(e.emoji==='🔊'){
+      // Speaker box
+      ctx.fillStyle='#2a2a3a';ctx.fillRect(-16,-18,32,36);
+      ctx.fillStyle='#444';ctx.fillRect(-14,-16,28,32);
+      ctx.fillStyle='#667';ctx.beginPath();ctx.arc(0,2,11,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#334';ctx.beginPath();ctx.arc(0,2,7,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#99aacc';ctx.beginPath();ctx.arc(0,2,3,0,Math.PI*2);ctx.fill();
+      // Pulse rings
+      const pulse=Math.sin(fn*0.15)*0.4+0.6;
+      ctx.strokeStyle=`rgba(100,180,255,${pulse})`;ctx.lineWidth=2;
+      ctx.beginPath();ctx.arc(0,2,14,0,Math.PI*2);ctx.stroke();
+      ctx.strokeStyle=`rgba(100,180,255,${pulse*0.5})`;
+      ctx.beginPath();ctx.arc(0,2,18,0,Math.PI*2);ctx.stroke();
+    } else if(e.emoji==='🎶'){
+      // Floating music note
+      ctx.fillStyle='#ff80cc';
+      ctx.beginPath();ctx.ellipse(-4,8,7,5,-0.4,0,Math.PI*2);ctx.fill();
+      ctx.fillRect(3,-12,4,20);
+      ctx.beginPath();ctx.ellipse(12,4,7,5,-0.4,0,Math.PI*2);ctx.fill();
+      ctx.fillRect(19,-16,4,20);
+      ctx.fillRect(3,-12,20,4);
+    } else if(e.emoji==='🥬'){
+      // Flying cabbage
+      ctx.fillStyle='#2d8a20';ctx.beginPath();ctx.ellipse(0,0,14,11,Math.sin(fn*0.1)*0.3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#3aaa28';ctx.beginPath();ctx.ellipse(-4,-2,8,6,0.5,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.ellipse(4,2,8,6,-0.5,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='#1a6010';ctx.lineWidth=1.5;
+      ctx.beginPath();ctx.moveTo(-12,0);ctx.quadraticCurveTo(0,-8,12,0);ctx.stroke();
+    } else if(e.emoji==='🐦'){
+      // Crow
+      ctx.fillStyle='#1a1a1a';ctx.beginPath();ctx.ellipse(0,0,13,9,0,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.ellipse(0,-14,8,8,0,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#333';
+      ctx.beginPath();ctx.ellipse(-16,-2,10,5,0.3,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.ellipse(16,-2,10,5,-0.3,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ffcc00';ctx.beginPath();ctx.moveTo(6,-14);ctx.lineTo(14,-12);ctx.lineTo(6,-10);ctx.fill();
+      ctx.fillStyle='#ff4444';ctx.beginPath();ctx.arc(3,-16,2,0,Math.PI*2);ctx.fill();
+    } else if(e.emoji==='🚧'){
+      // Road barrier
+      ctx.fillStyle='#ff8800';ctx.fillRect(-16,-14,32,28);
+      ctx.fillStyle='#fff';
+      ctx.fillRect(-16,-14,32,9);ctx.fillRect(-16,5,32,9);
+      ctx.fillStyle='#ff8800';ctx.fillRect(-16,-5,32,10);
+      ctx.fillStyle='#cc4400';ctx.fillRect(-20,-4,6,8);ctx.fillRect(14,-4,6,8);
+    } else if(e.emoji==='🚗'){
+      // Car
+      ctx.fillStyle='#cc2222';ctx.fillRect(-18,-8,36,16);
+      ctx.fillStyle='#aa1111';ctx.fillRect(-14,-18,28,12);
+      ctx.fillStyle='#aaddff';ctx.fillRect(-12,-16,10,9);ctx.fillRect(2,-16,10,9);
+      ctx.fillStyle='#222';
+      ctx.beginPath();ctx.arc(-10,10,6,0,Math.PI*2);ctx.fill();
+      ctx.beginPath();ctx.arc(10,10,6,0,Math.PI*2);ctx.fill();
+      ctx.fillStyle='#ffff88';ctx.fillRect(-22,-4,6,6);
+      ctx.fillStyle='#ff4444';ctx.fillRect(16,-4,6,6);
+    } else {
+      // Fallback — bright red circle with X
+      ctx.fillStyle='#ff3333';ctx.beginPath();ctx.arc(0,0,14,0,Math.PI*2);ctx.fill();
+      ctx.strokeStyle='white';ctx.lineWidth=3;
+      ctx.beginPath();ctx.moveTo(-7,-7);ctx.lineTo(7,7);ctx.stroke();
+      ctx.beginPath();ctx.moveTo(7,-7);ctx.lineTo(-7,7);ctx.stroke();
+    }
+    ctx.restore();
+    // Ground shadow
+    ctx.save();ctx.globalAlpha=0.2;ctx.fillStyle='#000';
+    ctx.beginPath();ctx.ellipse(cx,ey+e.h+2,e.w*0.38,4,0,0,Math.PI*2);ctx.fill();
+    ctx.restore();
+  }
+}
+
+function drawPlayer(){
+  if(PL.inv>0&&Math.floor(PL.inv/5)%2===0)return;
+  const cx=PL.x-CAM.x,cy=PL.y-CAM.y;
+  ctx.save();ctx.translate(cx+PL.w/2,cy+PL.h);
+  if(PL.dir<0)ctx.scale(-1,1);
+  // Shadow
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  ctx.beginPath();ctx.ellipse(0,2,13,4,0,0,Math.PI*2);ctx.fill();
+  // Legs
+  const lsw=PL.onGround?Math.sin(PL.wf)*10:5;
+  ctx.fillStyle='#6b3fa0';
+  ctx.fillRect(-10,-20,8,20+lsw);
+  ctx.fillRect(2,-20,8,20-lsw);
+  // Shoes
+  ctx.fillStyle='#2d1b40';ctx.fillRect(-12,lsw,10,5);ctx.fillRect(0,-lsw,10,5);
+  // Kurti body
+  ctx.fillStyle='#ff6b9d';ctx.beginPath();ctx.roundRect(-13,-46,26,28,4);ctx.fill();
+  // Dupatta / top stripe
+  ctx.fillStyle='#ff9a3c';ctx.fillRect(-14,-46,28,7);
+  // Arms
+  const aw=PL.onGround?Math.sin(PL.wf+Math.PI)*7:0;
+  ctx.fillStyle='#ffb88c';
+  ctx.fillRect(-18,-44,6,16+aw);ctx.fillRect(12,-44,6,16-aw);
+  // Neck
+  ctx.fillStyle='#ffb88c';ctx.fillRect(-5,-53,10,9);
+  // Head
+  ctx.fillStyle='#ffb88c';ctx.beginPath();ctx.arc(0,-64,14,0,Math.PI*2);ctx.fill();
+  // Hair
+  ctx.fillStyle='#1a0a2e';
+  ctx.beginPath();ctx.arc(0,-66,15,Math.PI,0);ctx.fill();
+  ctx.fillRect(-14,-66,6,22);ctx.fillRect(8,-66,6,22);
+  // Eyes
+  ctx.fillStyle='#1a0a2e';
+  ctx.beginPath();ctx.arc(-5,-63,2.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(5,-63,2.5,0,Math.PI*2);ctx.fill();
+  // Smile
+  ctx.strokeStyle='#1a0a2e';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(0,-60,5,0.15,Math.PI-0.15);ctx.stroke();
+  // Bindi 🔴
+  ctx.fillStyle='#ff1744';ctx.beginPath();ctx.arc(0,-69,2.2,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+}
+
+function drawMilo(){
+  const mx=miloX-CAM.x,my=miloY-CAM.y+Math.sin(fn*0.07)*4;
+  if(mx<-60||mx>W+60)return;
+  ctx.save();ctx.translate(mx,my);
+  // Milo — fluffy dog
+  const bob=Math.sin(fn*0.07)*2;
+  ctx.translate(0,bob);
+  // Shadow
+  ctx.fillStyle='rgba(0,0,0,0.18)';
+  ctx.beginPath();ctx.ellipse(0,22,18,5,0,0,Math.PI*2);ctx.fill();
+  // Back legs
+  ctx.fillStyle='#e8e8f0';ctx.beginPath();ctx.ellipse(-10,18,6,9,0.3,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(10,18,6,9,-0.3,0,Math.PI*2);ctx.fill();
+  // Body — fluffy white
+  ctx.fillStyle='#f0f0f8';
+  ctx.beginPath();ctx.ellipse(0,6,18,14,0,0,Math.PI*2);ctx.fill();
+  // Fluffy fur bumps on body
+  ctx.fillStyle='#fafafe';
+  for(let i=0;i<6;i++){
+    const bx=-14+i*6,by=0+Math.sin(i*1.2)*4;
+    ctx.beginPath();ctx.arc(bx,by,5,0,Math.PI*2);ctx.fill();
+  }
+  // Front legs
+  ctx.fillStyle='#e8e8f0';
+  ctx.beginPath();ctx.ellipse(-9,16,5,8,0.2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(9,16,5,8,-0.2,0,Math.PI*2);ctx.fill();
+  // Paws
+  ctx.fillStyle='#d8d8e8';
+  ctx.beginPath();ctx.ellipse(-9,23,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(9,23,6,4,0,0,Math.PI*2);ctx.fill();
+  // Neck
+  ctx.fillStyle='#f0f0f8';ctx.beginPath();ctx.ellipse(0,-6,9,8,0,0,Math.PI*2);ctx.fill();
+  // Head — round and fluffy
+  ctx.fillStyle='#fafafe';ctx.beginPath();ctx.arc(0,-18,16,0,Math.PI*2);ctx.fill();
+  // Fluffy head bumps
+  ctx.fillStyle='#ffffff';
+  ctx.beginPath();ctx.arc(-10,-20,8,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(10,-20,8,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(0,-26,8,0,Math.PI*2);ctx.fill();
+  // Ears — floppy fluffy
+  ctx.fillStyle='#e0e0ee';
+  ctx.beginPath();ctx.ellipse(-16,-20,7,10,0.4,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(16,-20,7,10,-0.4,0,Math.PI*2);ctx.fill();
+  // Eyes — big dark cute
+  ctx.fillStyle='#1a0a10';
+  ctx.beginPath();ctx.arc(-6,-18,4,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(6,-18,4,0,Math.PI*2);ctx.fill();
+  // Eye shine
+  ctx.fillStyle='white';
+  ctx.beginPath();ctx.arc(-5,-20,1.5,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(7,-20,1.5,0,Math.PI*2);ctx.fill();
+  // Nose
+  ctx.fillStyle='#c06080';
+  ctx.beginPath();ctx.ellipse(0,-13,4,3,0,0,Math.PI*2);ctx.fill();
+  // Mouth / tongue
+  ctx.strokeStyle='#c06080';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.arc(0,-10,3,0.2,Math.PI-0.2);ctx.stroke();
+  ctx.fillStyle='#ff80a0';ctx.beginPath();ctx.ellipse(0,-8,3,3,0,0,Math.PI);ctx.fill();
+  // Tail — fluffy curly
+  ctx.fillStyle='#fafafe';
+  ctx.beginPath();ctx.arc(18,0,8,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(22,-5,6,0,Math.PI*2);ctx.fill();
+  // Little collar — pink
+  ctx.fillStyle='#ff6b9d';ctx.beginPath();ctx.rect(-10,-10,20,5);ctx.fill();
+  ctx.fillStyle='#ffd700';ctx.beginPath();ctx.arc(0,-8,3,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+  // Speech bubble when close
+  const dist=Math.abs(PL.x-miloX);
+  if(dist<360){
+    const alpha=Math.min(1,(360-dist)/200);
+    ctx.save();ctx.globalAlpha=alpha;
+    drawBubble(mx,my-52,LD.miloSay);
+    ctx.restore();
+  }
+}
+
+function drawGoal(){
+  const gx=goal.x-CAM.x,gy=goal.y-CAM.y;
+  if(gx<-80||gx>W+80)return;
+  ctx.shadowColor='#ffd700';ctx.shadowBlur=20;
+  ctx.font='46px serif';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(lvl===4?'🚗':'🚪',gx+goal.w/2,gy+goal.h/2+Math.sin(fn*0.05)*3);
+  ctx.shadowBlur=0;
+  // Label
+  ctx.fillStyle='rgba(255,215,0,0.9)';ctx.font='bold 11px Fredoka One,sans-serif';
+  ctx.fillText(lvl===4?'LOLA!':'GOAL',gx+goal.w/2,gy-10);
+}
+
+function drawBubble(bx,by,text){
+  ctx.font='bold 12px Nunito,sans-serif';
+  const tw=Math.min(ctx.measureText(text).width,240)+20;
+  const bh=28;
+  ctx.fillStyle='white';ctx.strokeStyle='#ff6b9d';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(bx-tw/2,by-bh-8,tw,bh,8);ctx.fill();ctx.stroke();
+  ctx.beginPath();ctx.moveTo(bx-6,by-8);ctx.lineTo(bx,by+4);ctx.lineTo(bx+6,by-8);ctx.fill();
+  ctx.fillStyle='#2d1b33';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(text,bx,by-bh/2-8);
+}
+
+function drawHUD(){
+  // Top bar
+  ctx.fillStyle='rgba(10,5,20,0.75)';ctx.fillRect(0,0,W,44);
+  ctx.strokeStyle='rgba(255,107,157,0.3)';ctx.lineWidth=1;ctx.strokeRect(0,44,W,0);
+  // Lives — draw hearts as shapes (no emoji)
+  for(let i=0;i<PL.lives;i++){
+    const hx=14+i*26, hy=22;
+    ctx.fillStyle='#ff6b9d';
+    ctx.beginPath();ctx.arc(hx-5,hy-3,5,Math.PI,0);ctx.arc(hx+5,hy-3,5,Math.PI,0);
+    ctx.lineTo(hx,hy+8);ctx.closePath();ctx.fill();
+  }
+  // Level name
+  ctx.font='bold 14px Fredoka One,sans-serif';ctx.fillStyle='white';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(LD.name,W/2,22);
+  // Score
+  const taken=coins.filter(c=>c.collected).length;
+  ctx.font='bold 13px Nunito,sans-serif';ctx.fillStyle='#ffd700';ctx.textAlign='right';ctx.textBaseline='middle';
+  ctx.fillText(`FOOD ${taken}/${coins.length}   SCORE ${score}`,W-52,22);
+  // Mute button
+  const mx=W-24,my=22,mr=14;
+  ctx.fillStyle=MUSIC.muted?'rgba(255,50,50,0.8)':'rgba(100,220,150,0.8)';
+  ctx.beginPath();ctx.arc(mx,my,mr,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='white';ctx.font='bold 12px sans-serif';ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText(MUSIC.muted?'OFF':'ON',mx,my);
+}
+
+// ── Story/UI Screens ──────────────────────────────────────────
+function drawOverlay(alpha){
+  ctx.fillStyle=`rgba(7,4,15,${alpha})`;ctx.fillRect(0,0,W,H);
+}
+
+function drawCard(title,body,hint){
+  drawOverlay(0.88);
+  // Card
+  ctx.fillStyle='rgba(45,27,51,0.95)';ctx.strokeStyle='#ff6b9d';ctx.lineWidth=2.5;
+  ctx.beginPath();ctx.roundRect(W/2-340,H/2-160,680,320,18);ctx.fill();ctx.stroke();
+  // Title
+  ctx.font='bold 28px Fredoka One,sans-serif';ctx.fillStyle='#ffd700';
+  ctx.textAlign='center';ctx.textBaseline='top';
+  ctx.fillText(title,W/2,H/2-140);
+  // Body
+  ctx.font='bold 17px Nunito,sans-serif';ctx.fillStyle='#e8d0e8';
+  ctx.textBaseline='top';
+  wrapText(body,W/2,H/2-90,600,26);
+  // Hint blink
+  if(Math.floor(fn/25)%2===0){
+    ctx.fillStyle='rgba(255,200,220,0.8)';ctx.font='bold 14px Nunito,sans-serif';
+    ctx.textBaseline='bottom';ctx.fillText(hint,W/2,H/2+148);
+  }
+}
+
+function drawIntro(){
+  ctx.fillStyle='#07040f';ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha=1;ctx.shadowBlur=0;
+  // Stars
+  for(let i=0;i<60;i++){
+    ctx.fillStyle='rgba(255,255,255,'+(0.3+Math.sin(fn*0.05+i)*0.3)+')';
+    ctx.beginPath();ctx.arc((i*97+13)%W,(i*61+7)%H,0.5+Math.sin(fn*0.05+i)*0.4,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;ctx.shadowBlur=0;
+
+  // Title row
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold 46px Fredoka One,sans-serif';
+  ctx.fillStyle='#ff6b9d';ctx.shadowColor='#ff6b9d';ctx.shadowBlur=16;
+  ctx.fillText("Milo's Great Escape",W/2,52);ctx.shadowBlur=0;
+  ctx.font='bold 17px Fredoka One,sans-serif';ctx.fillStyle='#ffd93d';
+  ctx.fillText('A Kanaka Adventure  —  5 Levels of Pure Chaos',W/2,86);
+
+  // ── Card dimensions ────────────────────────────────────────
+  const PAD=20, GAP=16;
+  const cardY=106, cardH=306;
+  const leftW=420, rightW=W-PAD*2-leftW-GAP;
+  const leftX=PAD, rightX=PAD+leftW+GAP;
+
+  // ── LEFT CARD: How to Play ─────────────────────────────────
+  ctx.fillStyle='rgba(45,20,55,0.92)';ctx.strokeStyle='#ff6b9d';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(leftX,cardY,leftW,cardH,14);ctx.fill();ctx.stroke();
+
+  ctx.fillStyle='#ffd700';ctx.font='bold 18px Fredoka One,sans-serif';
+  ctx.textAlign='center';ctx.textBaseline='top';
+  ctx.fillText('HOW TO PLAY',leftX+leftW/2,cardY+14);
+
+  const controls=[
+    ['MOVE','Arrow Keys / WASD'],
+    ['JUMP','Space / W / ↑  (double jump!)'],
+    ['STOMP','Land on top of enemies'],
+    ['COLLECT','Walk over the food'],
+    ['MUTE','M key or ON/OFF button'],
+    ['PAUSE','ESC'],
+  ];
+  controls.forEach(([key,val],i)=>{
+    const ty=cardY+46+i*40;
+    const rowW=leftW-24;
+    ctx.fillStyle='rgba(255,107,157,0.18)';
+    ctx.beginPath();ctx.roundRect(leftX+12,ty-1,rowW,30,5);ctx.fill();
+    ctx.fillStyle='#ff9a3c';ctx.font='bold 12px Nunito,sans-serif';
+    ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText(key,leftX+22,ty+14);
+    ctx.fillStyle='#e8d0e8';ctx.font='13px Nunito,sans-serif';
+    ctx.fillText(val,leftX+112,ty+14);
+  });
+
+  // ── RIGHT CARD: The Story ──────────────────────────────────
+  ctx.fillStyle='rgba(45,20,55,0.92)';ctx.strokeStyle='#ffd700';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(rightX,cardY,rightW,cardH,14);ctx.fill();ctx.stroke();
+
+  ctx.fillStyle='#ffd700';ctx.font='bold 18px Fredoka One,sans-serif';
+  ctx.textAlign='center';ctx.textBaseline='top';
+  ctx.fillText('THE STORY',rightX+rightW/2,cardY+14);
+
+  const story=[
+    'Milo — your fluffy dog — stole your',
+    'vada pav and started Lola the Corolla.',
+    'First try. He never does it first try.',
+    '',
+    'Chase him across 5 levels:',
+    'Dombivli → Sahyadri → Music Fest',
+    '→ Dadar Market → Highway',
+    '',
+    'Yellow platforms MOVE — ride them!',
+    'Find Milo at the end of each level.',
+    '',
+    'Sachi is not helping.',
+    'Prabh is trying her best.',
+    'Milo is absolutely thriving.',
+  ];
+  ctx.font='14px Nunito,sans-serif';ctx.fillStyle='#e8d0e8';
+  ctx.textAlign='left';ctx.textBaseline='top';
+  let sy=cardY+46;
+  story.forEach(line=>{
+    if(!line){sy+=8;return;}
+    ctx.fillText(line,rightX+16,sy);
+    sy+=20;
+  });
+
+  // ── BOTTOM LEGEND ──────────────────────────────────────────
+  const legY=cardY+cardH+10, legH=52;
+  ctx.fillStyle='rgba(45,20,55,0.88)';ctx.strokeStyle='rgba(255,107,157,0.5)';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.roundRect(PAD,legY,W-PAD*2,legH,10);ctx.fill();ctx.stroke();
+
+  ctx.fillStyle='#ff9a3c';ctx.font='bold 12px Nunito,sans-serif';
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.fillText('AVOID THESE — stomp (land on top) to defeat',W/2,legY+13);
+
+  const eData=[
+    ['Auto','#f0c000'],['Bee','#ffe040'],['Speaker','#7070ff'],
+    ['Cabbage','#40bb40'],['Car','#dd3333']
+  ];
+  const eSpacing=(W-PAD*2)/5;
+  eData.forEach(([name,col],i)=>{
+    const ex=PAD+eSpacing*i+eSpacing/2;
+    ctx.fillStyle=col;ctx.beginPath();ctx.arc(ex-22,legY+36,7,0,Math.PI*2);ctx.fill();
+    ctx.strokeStyle='rgba(255,255,255,0.25)';ctx.lineWidth=1;ctx.stroke();
+    ctx.fillStyle='#ffe0e0';ctx.font='bold 12px Nunito,sans-serif';
+    ctx.textAlign='left';ctx.textBaseline='middle';
+    ctx.fillText(name,ex-12,legY+36);
+  });
+
+  // ── BLINK PROMPT ───────────────────────────────────────────
+  if(Math.floor(fn/28)%2===0){
+    ctx.fillStyle='#ff9a3c';ctx.font='bold 19px Fredoka One,sans-serif';
+    ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.shadowColor='#ff9a3c';ctx.shadowBlur=10;
+    ctx.fillText('[ Press SPACE or ENTER to begin! ]',W/2,H-18);
+    ctx.shadowBlur=0;
+  }
+}
+
+function drawStory(){
+  const pages=LEVELS[lvl].story;
+  const p=pages[storyPage];
+  const isLast=storyPage===pages.length-1;
+  drawCard(`— ${LEVELS[lvl].name} —`,p,isLast?'[ SPACE to play! ]':'[ SPACE to continue ]');
+}
+
+function drawCleared(){
+  const pages=LEVELS[lvl].clear;
+  const p=pages[clearPage];
+  drawCard('🎉 LEVEL CLEAR! 🎉',p,clearPage<pages.length-1?'[ SPACE to continue ]':'[ SPACE for next level! ]');
+}
+
+function drawGameOver(){
+  drawOverlay(0.9);
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold 58px Fredoka One,sans-serif';ctx.fillStyle='#ff3d7f';
+  ctx.shadowColor='#ff3d7f';ctx.shadowBlur=20;ctx.fillText('GAME OVER',W/2,H/2-70);
+  ctx.shadowBlur=0;
+  ctx.font='bold 22px Nunito,sans-serif';ctx.fillStyle='#e8d0e8';
+  ctx.fillText(`Score: ${score}  ·  Reached: ${LEVELS[lvl].name}`,W/2,H/2);
+  ctx.font='16px Nunito,sans-serif';ctx.fillStyle='rgba(200,160,200,0.7)';
+  ctx.fillText('Milo is still out there. Lola is fine. Probably.',W/2,H/2+40);
+  if(Math.floor(fn/28)%2===0){
+    ctx.fillStyle='#ff9a3c';ctx.font='bold 18px Fredoka One,sans-serif';
+    ctx.fillText('[ SPACE to try again ]',W/2,H/2+90);
+  }
+}
+
+function drawWin(){
+  const CX=W/2;
+  // Night sky
+  const sky=ctx.createLinearGradient(0,0,0,H);
+  sky.addColorStop(0,'#07040f');sky.addColorStop(0.6,'#1a0a2e');sky.addColorStop(1,'#2d1040');
+  ctx.fillStyle=sky;ctx.fillRect(0,0,W,H);
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+
+  // Stars
+  for(let i=0;i<80;i++){
+    const sx=(i*137+31)%W,sy=(i*79+11)%(H*0.55);
+    const tw=0.4+Math.abs(Math.sin(fn*0.04+i*0.7))*0.8;
+    ctx.globalAlpha=tw*0.85;ctx.fillStyle='white';
+    ctx.beginPath();ctx.arc(sx,sy,0.8+tw*0.5,0,Math.PI*2);ctx.fill();
+  }
+  ctx.globalAlpha=1;
+
+  // Moon
+  ctx.fillStyle='#fff8e0';ctx.beginPath();ctx.arc(W-130,80,50,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,240,180,0.12)';ctx.beginPath();ctx.arc(W-130,80,70,0,Math.PI*2);ctx.fill();
+
+  // Ground
+  ctx.fillStyle='#1a1008';
+  ctx.beginPath();ctx.ellipse(CX,H+40,W*0.75,130,0,Math.PI,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#2a3a10';
+  for(let i=0;i<18;i++){
+    const gx=80+i*50+Math.sin(i*1.7)*20,gy=H-24+Math.sin(i*2.3)*8;
+    ctx.beginPath();ctx.moveTo(gx,gy);ctx.lineTo(gx-6,gy-14);ctx.lineTo(gx+6,gy-14);ctx.closePath();ctx.fill();
+  }
+
+  // Lola parked right side
+  ctx.save();ctx.translate(W-210,H-102);
+  ctx.fillStyle='#cc2222';ctx.fillRect(-55,-22,110,36);
+  ctx.fillStyle='#aa1111';ctx.beginPath();ctx.roundRect(-40,-38,80,20,6);ctx.fill();
+  ctx.fillStyle='rgba(150,220,255,0.6)';
+  ctx.beginPath();ctx.roundRect(-36,-36,34,16,3);ctx.fill();
+  ctx.beginPath();ctx.roundRect(4,-36,30,16,3);ctx.fill();
+  ctx.fillStyle='#1a1a1a';
+  ctx.beginPath();ctx.arc(-32,16,12,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(32,16,12,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#555';
+  ctx.beginPath();ctx.arc(-32,16,6,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(32,16,6,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,255,180,0.7)';ctx.font='bold 9px sans-serif';
+  ctx.textAlign='center';ctx.textBaseline='middle';ctx.fillText('LOLA',0,-10);
+  ctx.restore();
+
+  // ── Kanaka (drawn character, happy) ────────────────────────
+  const bob=Math.sin(fn*0.04)*4;
+  const kx=CX-55,ky=H-140+bob;
+  ctx.save();ctx.translate(kx,ky);
+  ctx.fillStyle='rgba(0,0,0,0.18)';ctx.beginPath();ctx.ellipse(0,62,20,5,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#6b3fa0';ctx.fillRect(-12,20,10,30);ctx.fillRect(2,20,10,30);
+  ctx.fillStyle='#2d1b40';ctx.fillRect(-14,48,12,6);ctx.fillRect(0,48,12,6);
+  ctx.fillStyle='#ff6b9d';ctx.beginPath();ctx.roundRect(-14,-28,28,52,5);ctx.fill();
+  ctx.fillStyle='#ff9a3c';ctx.fillRect(-15,-28,30,9);
+  ctx.fillStyle='#ffb88c';ctx.fillRect(-18,-22,6,22);
+  ctx.fillStyle='#ffb88c';ctx.fillRect(14,-22,22,7);
+  ctx.fillStyle='#ffb88c';ctx.fillRect(-5,-38,10,12);
+  ctx.fillStyle='#ffb88c';ctx.beginPath();ctx.arc(0,-48,15,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#1a0a2e';ctx.beginPath();ctx.arc(0,-50,16,Math.PI,0);ctx.fill();
+  ctx.fillRect(-15,-50,7,24);ctx.fillRect(8,-50,7,24);
+  ctx.strokeStyle='#1a0a2e';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(-5,-48,4,Math.PI+0.3,Math.PI*2-0.3);ctx.stroke();
+  ctx.beginPath();ctx.arc(5,-48,4,Math.PI+0.3,Math.PI*2-0.3);ctx.stroke();
+  ctx.beginPath();ctx.arc(0,-43,7,0.1,Math.PI-0.1);ctx.stroke();
+  ctx.fillStyle='#ff1744';ctx.beginPath();ctx.arc(0,-54,2.5,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='rgba(255,100,120,0.35)';
+  ctx.beginPath();ctx.ellipse(-9,-45,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(9,-45,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+
+  // ── Milo (fluffy dog, tail wagging) ────────────────────────
+  const mx2=CX+60,my2=H-122+bob+Math.sin(fn*0.07)*3;
+  ctx.save();ctx.translate(mx2,my2);
+  const tailWag=Math.sin(fn*0.2)*24;
+  ctx.fillStyle='rgba(0,0,0,0.16)';ctx.beginPath();ctx.ellipse(0,28,18,5,0,0,Math.PI*2);ctx.fill();
+  // Wagging tail
+  ctx.save();ctx.translate(16,0);ctx.rotate(tailWag*Math.PI/180);
+  ctx.fillStyle='#fafafe';ctx.beginPath();ctx.arc(8,0,9,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(14,-5,7,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+  // Body
+  ctx.fillStyle='#e8e8f0';ctx.beginPath();ctx.ellipse(-10,20,7,10,0.3,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(10,20,7,10,-0.3,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#f0f0f8';ctx.beginPath();ctx.ellipse(0,8,18,15,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fafafe';
+  for(let i=0;i<6;i++){ctx.beginPath();ctx.arc(-14+i*6,2+Math.sin(i*1.3)*3,5,0,Math.PI*2);ctx.fill();}
+  const bounce=Math.abs(Math.sin(fn*0.2))*6;
+  ctx.fillStyle='#e8e8f0';
+  ctx.beginPath();ctx.ellipse(-9,18-bounce,5,9,0.2,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(9,18-bounce,5,9,-0.2,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#d8d8e8';
+  ctx.beginPath();ctx.ellipse(-9,26-bounce,6,4,0,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(9,26-bounce,6,4,0,0,Math.PI*2);ctx.fill();
+  // Head
+  ctx.fillStyle='#f0f0f8';ctx.beginPath();ctx.ellipse(0,-4,9,8,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#fafafe';ctx.beginPath();ctx.arc(0,-18,17,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(-11,-20,9,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(11,-20,9,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.arc(0,-26,9,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#e0e0ee';
+  ctx.beginPath();ctx.ellipse(-17,-20,8,11,0.4,0,Math.PI*2);ctx.fill();
+  ctx.beginPath();ctx.ellipse(17,-20,8,11,-0.4,0,Math.PI*2);ctx.fill();
+  ctx.strokeStyle='#1a0a10';ctx.lineWidth=2;
+  ctx.beginPath();ctx.arc(-6,-19,4,Math.PI+0.3,Math.PI*2-0.3);ctx.stroke();
+  ctx.beginPath();ctx.arc(6,-19,4,Math.PI+0.3,Math.PI*2-0.3);ctx.stroke();
+  ctx.fillStyle='#c06080';ctx.beginPath();ctx.ellipse(0,-14,4,3,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#ff80a0';ctx.beginPath();ctx.ellipse(0,-9,5,6,0,0,Math.PI);ctx.fill();
+  ctx.strokeStyle='#cc5070';ctx.lineWidth=1;ctx.beginPath();ctx.moveTo(-5,-9);ctx.lineTo(5,-9);ctx.stroke();
+  ctx.fillStyle='#ff6b9d';ctx.beginPath();ctx.roundRect(-11,-10,22,5,2);ctx.fill();
+  ctx.fillStyle='#ffd700';ctx.beginPath();ctx.arc(0,-8,3,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+
+  // Floating hearts
+  for(let i=0;i<5;i++){
+    const hbob=Math.sin(fn*0.06+i*1.2)*8;
+    const hx2=CX+Math.cos(fn*0.03+i*1.26)*44;
+    const hy2=H-178-i*22+hbob;
+    const hs=7+Math.sin(fn*0.05+i)*2;
+    ctx.save();ctx.globalAlpha=0.65+Math.sin(fn*0.05+i)*0.25;
+    ctx.fillStyle=['#ff6b9d','#ff9a3c','#ffd700','#ff6b9d','#a78bfa'][i];
+    ctx.beginPath();ctx.arc(hx2-hs*0.4,hy2,hs*0.5,Math.PI,0);
+    ctx.arc(hx2+hs*0.4,hy2,hs*0.5,Math.PI,0);
+    ctx.lineTo(hx2,hy2+hs*1.1);ctx.closePath();ctx.fill();
+    ctx.restore();
+  }
+
+  // Vada pav between them (with bite)
+  ctx.save();ctx.translate(CX,H-108);
+  ctx.fillStyle='#c8784a';ctx.beginPath();ctx.ellipse(0,4,14,9,0,0,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#e8a060';ctx.beginPath();ctx.ellipse(0,-2,13,7,0,Math.PI,Math.PI*2);ctx.fill();
+  ctx.fillStyle='#5a3010';ctx.beginPath();ctx.ellipse(0,6,10,4,0,0,Math.PI);ctx.fill();
+  ctx.fillStyle='#1a0a2e';ctx.beginPath();ctx.arc(11,-1,5,0,Math.PI*2);ctx.fill();
+  ctx.restore();
+
+  // Title
+  ctx.globalAlpha=1;ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold 46px Fredoka One,sans-serif';
+  ctx.fillStyle='#ffd700';ctx.shadowColor='#ffd700';ctx.shadowBlur=18;
+  ctx.fillText('KANAKA WINS!!',CX,40);ctx.shadowBlur=0;
+
+  // Story card
+  ctx.fillStyle='rgba(18,8,32,0.9)';ctx.strokeStyle='#ff6b9d';ctx.lineWidth=2;
+  ctx.beginPath();ctx.roundRect(55,68,W-110,132,14);ctx.fill();ctx.stroke();
+  ctx.textBaseline='top';
+  const slines=[
+    ['After 5 levels of chaos, Kanaka finally caught Milo at the highway.','#e8d0e8','15px Nunito,sans-serif'],
+    ['Milo slid the vada pav across Lola\'s hood. One bite taken out.','#ffd700','bold 14px Nunito,sans-serif'],
+    ['Kanaka ate it anyway. Obviously.','#ffd700','bold 14px Nunito,sans-serif'],
+    ['','',''],
+    ['Sachi: arrived 40 mins late with flowers.  Prabh: still having chai in Dadar.','#e8d0e8','13px Nunito,sans-serif'],
+  ];
+  let ty=80;
+  slines.forEach(([txt,col,font])=>{
+    if(!txt){ty+=8;return;}
+    ctx.fillStyle=col;ctx.font=font;ctx.textAlign='center';ctx.fillText(txt,CX,ty);ty+=22;
+  });
+
+  // Score
+  ctx.fillStyle='rgba(255,107,157,0.18)';ctx.strokeStyle='rgba(255,107,157,0.5)';ctx.lineWidth=1.5;
+  ctx.beginPath();ctx.roundRect(CX-185,210,370,30,8);ctx.fill();ctx.stroke();
+  ctx.font='bold 14px Fredoka One,sans-serif';ctx.fillStyle='#ffd93d';ctx.textBaseline='middle';
+  ctx.fillText('Score: '+score+'   Food: '+totalCoins+'/40',CX,225);
+
+  // Personal message
+  ctx.fillStyle='rgba(255,40,100,0.08)';ctx.strokeStyle='#ff6b9d';ctx.lineWidth=2.5;
+  ctx.beginPath();ctx.roundRect(55,250,W-110,150,18);ctx.fill();ctx.stroke();
+  [[83,266],[W-83,266],[83,384],[W-83,384]].forEach(function(h){
+    ctx.save();ctx.fillStyle='#ff6b9d';ctx.globalAlpha=0.85;
+    ctx.beginPath();ctx.arc(h[0]-5,h[1],5,Math.PI,0);ctx.arc(h[0]+5,h[1],5,Math.PI,0);
+    ctx.lineTo(h[0],h[1]+11);ctx.closePath();ctx.fill();ctx.restore();
+  });
+  ctx.textBaseline='middle';ctx.textAlign='center';
+  ctx.font='bold 26px Fredoka One,sans-serif';
+  ctx.fillStyle='#ff6b9d';ctx.shadowColor='#ff6b9d';ctx.shadowBlur=12;
+  ctx.fillText('Hope this cheered you up',CX,278);ctx.shadowBlur=0;
+  ctx.font='italic bold 18px Nunito,sans-serif';ctx.fillStyle='#ffd700';
+  ctx.fillText('A small gift for a beautiful girl',CX,308);
+  ctx.font='15px Nunito,sans-serif';ctx.fillStyle='rgba(230,205,235,0.95)';
+  ctx.fillText('You chased a fluffy menace across Maharashtra and did it with style.',CX,336);
+  ctx.fillText('Bad days do not last.',CX,358);
+  ctx.font='bold 16px Nunito,sans-serif';ctx.fillStyle='#ff9a3c';
+
+  if(Math.floor(fn/28)%2===0){
+    ctx.fillStyle='#ff9a3c';ctx.font='bold 15px Fredoka One,sans-serif';
+    ctx.shadowColor='#ff9a3c';ctx.shadowBlur=8;
+    ctx.fillText('[ SPACE to play again \u2014 Milo will absolutely do this again ]',CX,H-14);
+    ctx.shadowBlur=0;
+  }
+}
+
+
+function drawDying(){
+  ctx.save();ctx.globalAlpha=0.5+Math.sin(fn*0.3)*0.3;
+  ctx.fillStyle='#ff0040';ctx.fillRect(0,0,W,H);
+  ctx.restore();
+}
+
+function drawPause(){
+  drawOverlay(0.7);
+  ctx.textAlign='center';ctx.textBaseline='middle';
+  ctx.font='bold 48px Fredoka One,sans-serif';ctx.fillStyle='white';
+  ctx.fillText('PAUSED',W/2,H/2-30);
+  ctx.font='bold 18px Nunito,sans-serif';ctx.fillStyle='rgba(220,180,220,0.8)';
+  ctx.fillText('Milo is waiting. Lola is idling. Press ESC to resume.',W/2,H/2+30);
+}
+
+// ── Input handler ─────────────────────────────────────────────
+function onKey(code){
+  // M key = mute toggle
+  if(code==='KeyM'){MUSIC.toggleMute();return;}
+  if(code==='Escape'){
+    if(GS==='PLAYING'){prevGS=GS;GS='PAUSED';}
+    else if(GS==='PAUSED'){GS=prevGS;}
+    return;
+  }
+  const advance=['Space','Enter','ArrowUp','KeyW'];
+  if(!advance.includes(code))return;
+
+  if(GS==='INTRO'){
+    loadLevel(0);startStory();
+  }else if(GS==='STORY'){
+    storyPage++;
+    if(storyPage>=LEVELS[lvl].story.length)GS='PLAYING';
+  }else if(GS==='CLEARED'){
+    clearPage++;
+    if(clearPage>=LEVELS[lvl].clear.length){
+      lvl++;loadLevel(lvl);startStory();
+    }
+  }else if(GS==='GAMEOVER'){
+    lvl=0;score=0;totalCoins=0;PL.lives=3;
+    loadLevel(0);startStory();
+  }else if(GS==='WIN'){
+    lvl=0;score=0;totalCoins=0;PL.lives=3;
+    GS='INTRO';
+  }else if(GS==='PLAYING'){
+    if(code==='Space'||code==='ArrowUp'||code==='KeyW'){
+      if(PL.jumpsLeft>0){
+        PL.vy=PL.jumpsLeft===2?JSPD:JSPD2;
+        if(PL.jumpsLeft===2)SFX.jump();else SFX.jump2();
+        PL.jumpsLeft--;
+      }
+    }
+  }
+}
+
+function startStory(){storyPage=0;GS='STORY';}
+
+// ── Main loop ─────────────────────────────────────────────────
+function update(){
+  fn++;
+  if(GS==='PLAYING'){
+    updateMovingPlats();
+    updatePlayer();
+    updateEnemies();
+    updateCam(LD.ww);
+  }
+}
+
+function draw(){
+  // Hard reset canvas state every frame — prevents any alpha/shadow leaks
+  ctx.globalAlpha=1;
+  ctx.shadowBlur=0;
+  ctx.shadowColor='transparent';
+  ctx.setLineDash([]);
+  ctx.lineWidth=1;
+
+  if(GS==='INTRO'){drawIntro();return;}
+  if(GS==='STORY'){
+    ctx.fillStyle='#07040f';ctx.fillRect(0,0,W,H);
+    drawStory();return;
+  }
+  if(GS==='GAMEOVER'){drawGameOver();return;}
+  if(GS==='WIN'){drawWin();return;}
+
+  // Game world
+  drawBg();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawPlatforms();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawCoins();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawGoal();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawMilo();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawEnemies();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawPlayer();
+  ctx.globalAlpha=1;ctx.shadowBlur=0;ctx.shadowColor='transparent';
+  drawHUD();
+  ctx.globalAlpha=1;
+
+  if(GS==='CLEARED')drawCleared();
+  if(GS==='PAUSED')drawPause();
+  if(GS==='DYING')drawDying();
+}
+
+// Click mute button (top-right circle in HUD)
+CVS.addEventListener('click',e=>{
+  const r=CVS.getBoundingClientRect();
+  const cx=(e.clientX-r.left)*(W/r.width);
+  const cy=(e.clientY-r.top)*(H/r.height);
+  if(Math.hypot(cx-(W-24),cy-22)<16) MUSIC.toggleMute();
+});
+
+function loop(){requestAnimationFrame(loop);update();draw();}
+loop();
+</script>
+</body>
+</html>
